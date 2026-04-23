@@ -1,0 +1,38 @@
+# LiteLLM Proxy Configuration for GLM-4.7-Flash-NVFP4
+#
+# Architecture:
+#   Copilot → LiteLLM (11111) → vLLM (11112)
+#                                        ↑
+#                                 /compress @ 11112
+#
+# Start vLLM backend (11112):  python3 glm_server.py
+# Start LiteLLM proxy (11111): python3 server_compress.py
+
+model_list:
+  - model_name: glm-4.7-flash-nvfp4
+    litellm_params:
+      model: openai/GadflyII/GLM-4.7-Flash-NVFP4
+      api_base: http://localhost:11112/v1
+      api_key: none
+      max_tokens: 8192
+      temperature: 0.7
+      enable_auto_tool_choice: true
+      tool_call_parser: hermes
+
+  - model_name: glm47flash
+    litellm_params:
+      model: openai/GadflyII/GLM-4.7-Flash-NVFP4
+      api_base: http://localhost:11112/v1
+      api_key: none
+      max_tokens: 8192
+      temperature: 0.7
+      enable_auto_tool_choice: true
+      tool_call_parser: hermes
+
+litellm_settings:
+  drop_params: true
+  request_timeout: 300
+  set_verbose: false
+
+general_settings:
+  completion_model: "glm-4.7-flash-nvfp4"
