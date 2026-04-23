@@ -16,11 +16,9 @@ Usage:
 """
 
 import os
-import sys
 import logging
+import asyncio
 from pathlib import Path
-from datetime import datetime
-import traceback
 
 import litellm
 
@@ -79,18 +77,30 @@ logger.info(
     os.environ.get("LITE_LLM_COMPRESS_TARGET_TOKENS", "16384"),
 )
 
-os.environ["CONFIG_FILE_PATH"] = str(CONFIG_PATH)
 os.environ.pop("LITELLM_MASTER_KEY", None)
 os.environ.pop("LITELLM_SALT_KEY", None)
+os.environ["CONFIG_FILE_PATH"] = str(CONFIG_PATH)
 
-os.execvpe(
-    sys.executable,
-    [
-        sys.executable,
-        "-m", "uvicorn",
+logger.info("=" * 60)
+logger.info("LiteLLM proxy starting in-process with GLM compression callback")
+logger.info("Callback threshold: %d tokens", int(os.environ.get("LITE_LLM_COMPRESS_THRESHOLD_TOKENS", "50000")))
+logger.info("Callback target: %d tokens", int(os.environ.get("LITE_LLM_COMPRESS_TARGET_TOKENS", "16384")))
+logger.info("=" * 60)
+
+# Verify callback is registered before starting
+from litellm.integrations.custom_logger import CustomLogger
+registered_callbacks = [cb for cb in litellm.callbacks if isinstance(cb, CustomLogger)]
+logger.info("Registered custom callbacks: %d", len(registered_callbacks))
+for cb in registered_callbacks:
+    logger.info("  - %s", type(cb).__name__)
+
+# Run uvicorn in the same process (NOT via exec — preserving callbacks)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
         "litellm.proxy.proxy_server:app",
-        "--host", LITELLM_HOST,
-        "--port", LITELLM_PORT,
-    ],
-    os.environ.copy(),
-)
+        host=LITELLM_HOST,
+        port=int(LITELLM_PORT),
+        reload=False,
+        log_level="debug",
+    )

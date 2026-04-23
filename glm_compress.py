@@ -26,6 +26,7 @@ from litellm.integrations.custom_logger import CustomLogger
 
 logger = logging.getLogger("glm_compress")
 
+COMPRESS_ENABLED: bool = os.environ.get("LITE_LLM_COMPRESS_ENABLED", "true").lower() not in ("false", "0", "no")
 COMPRESS_THRESHOLD_TOKENS: int = int(
     os.environ.get("LITE_LLM_COMPRESS_THRESHOLD_TOKENS", "50000")
 )
@@ -184,11 +185,13 @@ class GLMCompressCallback(CustomLogger):
         self.models = models or COMPRESSED_MODELS
         self.preserve_recent = preserve_recent
         logger.info(
-            "GLMCompressCallback init: threshold=%d tokens, target=%d tokens, models=%s",
-            self.threshold_tokens, self.target_tokens, self.models,
+            "GLMCompressCallback init: enabled=%s, threshold=%d tokens, target=%d tokens, models=%s",
+            COMPRESS_ENABLED, self.threshold_tokens, self.target_tokens, self.models,
         )
 
     def _should_compress(self, model: str | None, messages: list[dict]) -> bool:
+        if not COMPRESS_ENABLED:
+            return False
         if not model or not messages:
             return False
         model_lower = model.lower()
