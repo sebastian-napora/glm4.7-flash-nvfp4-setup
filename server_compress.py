@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-LiteLLM proxy with GLM-4.7-Flash-NVFP4 auto-compression.
+LiteLLM proxy for GLM-4.7-Flash-NVFP4.
 
 Architecture:
-    Copilot → LiteLLM (11111) → vLLM (11112)
-                                         ↑
-                                  /compress @ 11112
+    Copilot -> LiteLLM (11111) -> vLLM (11112)
 
 Usage:
     # Terminal 1: start vLLM backend on 11112
@@ -16,15 +14,12 @@ Usage:
 """
 
 import os
-import sys
 import logging
 from pathlib import Path
-from datetime import datetime
-import traceback
 
 import litellm
 
-import glm_compress  # noqa: F401 — must import before register()
+import glm_compress  # noqa: F401 — registers request sanitization before startup
 glm_compress.register()
 
 # Setup detailed logging
@@ -73,24 +68,30 @@ CONFIG_PATH = Path(__file__).parent / "lite_llm_config.yaml"
 
 logger.info("Starting LiteLLM proxy on %s:%s", LITELLM_HOST, LITELLM_PORT)
 logger.info("Config: %s", CONFIG_PATH)
-logger.info(
-    "Auto-compression: threshold=%s tokens, target=%s tokens",
-    os.environ.get("LITE_LLM_COMPRESS_THRESHOLD_TOKENS", "50000"),
-    os.environ.get("LITE_LLM_COMPRESS_TARGET_TOKENS", "16384"),
-)
+logger.info("Assistant history sanitization enabled")
 
-os.environ["CONFIG_FILE_PATH"] = str(CONFIG_PATH)
 os.environ.pop("LITELLM_MASTER_KEY", None)
 os.environ.pop("LITELLM_SALT_KEY", None)
+os.environ["CONFIG_FILE_PATH"] = str(CONFIG_PATH)
 
-os.execvpe(
-    sys.executable,
-    [
-        sys.executable,
-        "-m", "uvicorn",
+logger.info("=" * 60)
+logger.info("LiteLLM proxy starting in-process with GLM history sanitizer")
+logger.info("=" * 60)
+
+# Verify callback is registered before starting
+from litellm.integrations.custom_logger import CustomLogger
+registered_callbacks = [cb for cb in litellm.callbacks if isinstance(cb, CustomLogger)]
+logger.info("Registered custom callbacks: %d", len(registered_callbacks))
+for cb in registered_callbacks:
+    logger.info("  - %s", type(cb).__name__)
+
+# Run uvicorn in the same process (NOT via exec — preserving callbacks)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
         "litellm.proxy.proxy_server:app",
-        "--host", LITELLM_HOST,
-        "--port", LITELLM_PORT,
-    ],
-    os.environ.copy(),
-)
+        host=LITELLM_HOST,
+        port=int(LITELLM_PORT),
+        reload=False,
+        log_level="debug",
+    )

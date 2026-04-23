@@ -4,7 +4,6 @@
 # Kill by process name
 pkill -f "glm_server.py" 2>/dev/null
 pkill -f "server_compress.py" 2>/dev/null
-pkill -f "glm_compress.py" 2>/dev/null
 
 # Kill orphaned vLLM engine cores (can survive pkill by name)
 pkill -9 -f "VLLM::EngineCore" 2>/dev/null

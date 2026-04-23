@@ -8,9 +8,7 @@
 #   ./start.sh proxy    # start only LiteLLM proxy (11111)
 #
 # Architecture:
-#   Copilot → LiteLLM (11111) → vLLM (11112)
-#                                        ↑
-#                                 /compress @ 11112
+#   Copilot -> LiteLLM (11111) -> vLLM (11112)
 
 set -e
 
