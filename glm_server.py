@@ -19,6 +19,11 @@ import traceback
 # Allow long max_model_len (model's native limit is 202752)
 os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 
+# Disable FlashInfer MoE backends — they trigger CUDA misaligned address errors
+# on the GB10 (compute capability 12.1, beyond PyTorch's supported range 8.0-12.0).
+# Falls back to VLLM_CUTLASS MoE backend which is stable on this hardware.
+os.environ["VLLM_USE_FLASHINFER_MOE_FP4"] = "0"
+
 # Enable VLLM request logging
 os.environ["VLLM_WORKER_LOGGING_LEVEL"] = "DEBUG"
 
@@ -68,10 +73,10 @@ async def main():
         "--max-model-len", "202752",       # leave headroom for system prompt
         "--gpu-memory-utilization", "0.70",
         "--enforce-eager",
-        "--disable-log-stats",
         "--port", "11112",
         "--host", "0.0.0.0",
         "--enable-auto-tool-choice",
+        "--enable-prefix-caching",         # reuse KV blocks for shared prefixes (system prompt, tool schemas)
         "--tool-call-parser", "glm47",
         "--reasoning-parser", "glm45",
     ]
