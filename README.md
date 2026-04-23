@@ -5,21 +5,19 @@ Local vLLM + LiteLLM proxy stack for `GadflyII/GLM-4.7-Flash-NVFP4`.
 ## Architecture
 
 ```
-GitHub Copilot (VS Code) → LiteLLM (11111) → vLLM (11112)
-                                              ↑
-                                       /compress (self-compress)
+GitHub Copilot (VS Code) -> LiteLLM (11111) -> vLLM (11112)
 ```
 
-- **vLLM backend** (port 11112): loads model, handles inference, provides `/compress` endpoint
+- **vLLM backend** (port 11112): loads model and handles inference
 - **LiteLLM proxy** (port 11111): OpenAI-compatible HTTP API, handles auth/routing/callbacks
-- **Auto-compression**: LiteLLM callback intercepts long conversations, compresses via vLLM's `/compress`
+- **History sanitization**: strips stored reasoning blocks from assistant history before the next turn is forwarded
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `glm_server.py` | vLLM backend server |
-| `glm_compress.py` | LiteLLM callback for auto-compression |
+| `glm_compress.py` | LiteLLM callback that strips stored reasoning blocks from assistant history |
 | `server_compress.py` | LiteLLM proxy entrypoint |
 | `lite_llm_config.yaml` | LiteLLM model routing config |
 | `start.sh` | Convenience start script |
@@ -49,8 +47,6 @@ python server_compress.py
 |----------|------|---------|
 | `POST /v1/chat/completions` | 11111/11112 | Chat completion |
 | `GET /health` | 11111/11112 | Health check |
-| `POST /compress` | 11112 | Context compression |
-| `POST /compress/stream` | 11112 | Streaming compression |
 
 ## Copilot Integration
 

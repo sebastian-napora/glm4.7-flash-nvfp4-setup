@@ -11,7 +11,7 @@ Package contents (no model, no compiled venv — those are machine-specific):
   ├── kill.sh                 — stop all servers
   ├── requirements.txt        — pip dependencies
   ├── glm_server.py           — vLLM backend
-  ├── glm_compress.py         — LiteLLM compression callback
+  ├── glm_compress.py         — LiteLLM history sanitization callback
   ├── server_compress.py      — LiteLLM proxy entrypoint
   ├── lite_llm_config.yaml    — LiteLLM routing config
   ├── README.md                — deployment + usage guide
@@ -169,14 +169,6 @@ ENV_EXAMPLE = (
     "LITE_LLM_PROXY_HOST=0.0.0.0\n"
     "LITE_LLM_PROXY_PORT=11111\n"
     "\n"
-    "# ── Auto-compression ─────────────────────────────────────────────\n"
-    "# Trigger compression when estimated tokens exceed this:\n"
-    "LITE_LLM_COMPRESS_THRESHOLD_TOKENS=50000\n"
-    "# Target token count after compression:\n"
-    "LITE_LLM_COMPRESS_TARGET_TOKENS=16384\n"
-    "# Keep this many of the most recent messages verbatim:\n"
-    "LITE_LLM_COMPRESS_PRESERVE_RECENT=5\n"
-    "\n"
     "# ── Model cache ─────────────────────────────────────────────────\n"
     "# Optional: use a HuggingFace mirror for faster downloads:\n"
     "# HF_ENDPOINT=https://hf-mirror.com\n"
@@ -223,7 +215,7 @@ curl http://localhost:11111/health
 
 | Service | Port | Purpose |
 |---------|------|---------|
-| vLLM backend | 11112 | Inference + `/compress` |
+| vLLM backend | 11112 | Inference |
 | LiteLLM proxy | 11111 | OpenAI-compatible API for Copilot |
 
 ## Configuration
@@ -238,8 +230,6 @@ cp .env.example .env
 Key variables:
   `VLLM_PORT` / `VLLM_HOST` — vLLM backend address
   `LITE_LLM_PROXY_PORT` / `LITE_LLM_PROXY_HOST` — proxy address
-  `LITE_LLM_COMPRESS_THRESHOLD_TOKENS` — trigger compression above N tokens (default: 50 000)
-  `LITE_LLM_COMPRESS_TARGET_TOKENS` — compress down to N tokens (default: 16 384)
 
 ## Stopping
 
@@ -263,7 +253,7 @@ bash serve.sh
 ```
 
 **Low throughput**
-Increase `--gpu-memory-utilization` in `glm_server.py` (default: 0.35):
+Increase `--gpu-memory-utilization` in `glm_server.py` (default: 0.50):
 ```python
 "--gpu-memory-utilization", "0.80",
 ```
@@ -277,8 +267,8 @@ extension. Point it at `http://localhost:11111/v1/chat/completions`.
 
 | File | Role |
 |------|------|
-| `glm_server.py` | vLLM backend; loads model, handles inference + `/compress` |
-| `glm_compress.py` | LiteLLM hook; auto-compresses long conversations |
+| `glm_server.py` | vLLM backend; loads model and handles inference |
+| `glm_compress.py` | LiteLLM hook; strips stored reasoning blocks from assistant history |
 | `server_compress.py` | LiteLLM proxy entrypoint |
 | `lite_llm_config.yaml` | Model routing: `glm-4.7-flash-nvfp4` → `localhost:11112` |
 | `serve.sh` | Start both services |

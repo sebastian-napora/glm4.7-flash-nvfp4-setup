@@ -116,7 +116,7 @@ bash scripts/serve_backend.sh
 bash scripts/serve_proxy.sh
 ```
 
-### With custom ports or compression settings
+### With custom ports or proxy settings
 
 ```bash
 cp .env.example .env
@@ -185,12 +185,9 @@ Key environment variables (set in `.env` before running):
 | `VLLM_HOST` | `0.0.0.0` | vLLM bind address |
 | `LITE_LLM_PROXY_PORT` | `11111` | LiteLLM proxy port |
 | `LITE_LLM_PROXY_HOST` | `0.0.0.0` | LiteLLM bind address |
-| `LITE_LLM_COMPRESS_THRESHOLD_TOKENS` | `50000` | Trigger compression above this token count |
-| `LITE_LLM_COMPRESS_TARGET_TOKENS` | `16384` | Target token count after compression |
-| `LITE_LLM_COMPRESS_PRESERVE_RECENT` | `5` | Number of recent messages to keep verbatim |
 | `HF_ENDPOINT` | _(unset)_ | HuggingFace mirror (e.g. `https://hf-mirror.com`) |
 
-To adjust compression thresholds or other settings:
+To adjust ports or other settings:
 
 ```bash
 cp .env.example .env
@@ -232,7 +229,7 @@ python -c "from transformers import AutoTokenizer, AutoModelForCausalLM; \
 Increase GPU memory utilization in `glm_server.py`:
 
 ```python
-"--gpu-memory-utilization", "0.80",   # increase from default 0.35
+"--gpu-memory-utilization", "0.80",   # increase from default 0.50
 ```
 
 Restart after editing.

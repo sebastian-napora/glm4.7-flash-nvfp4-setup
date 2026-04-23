@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-LiteLLM proxy with GLM-4.7-Flash-NVFP4 auto-compression.
+LiteLLM proxy for GLM-4.7-Flash-NVFP4.
 
 Architecture:
-    Copilot → LiteLLM (11111) → vLLM (11112)
-                                         ↑
-                                  /compress @ 11112
+    Copilot -> LiteLLM (11111) -> vLLM (11112)
 
 Usage:
     # Terminal 1: start vLLM backend on 11112
@@ -17,12 +15,11 @@ Usage:
 
 import os
 import logging
-import asyncio
 from pathlib import Path
 
 import litellm
 
-import glm_compress  # noqa: F401 — must import before register()
+import glm_compress  # noqa: F401 — registers request sanitization before startup
 glm_compress.register()
 
 # Setup detailed logging
@@ -71,20 +68,14 @@ CONFIG_PATH = Path(__file__).parent / "lite_llm_config.yaml"
 
 logger.info("Starting LiteLLM proxy on %s:%s", LITELLM_HOST, LITELLM_PORT)
 logger.info("Config: %s", CONFIG_PATH)
-logger.info(
-    "Auto-compression: threshold=%s tokens, target=%s tokens",
-    os.environ.get("LITE_LLM_COMPRESS_THRESHOLD_TOKENS", "50000"),
-    os.environ.get("LITE_LLM_COMPRESS_TARGET_TOKENS", "16384"),
-)
+logger.info("Assistant history sanitization enabled")
 
 os.environ.pop("LITELLM_MASTER_KEY", None)
 os.environ.pop("LITELLM_SALT_KEY", None)
 os.environ["CONFIG_FILE_PATH"] = str(CONFIG_PATH)
 
 logger.info("=" * 60)
-logger.info("LiteLLM proxy starting in-process with GLM compression callback")
-logger.info("Callback threshold: %d tokens", int(os.environ.get("LITE_LLM_COMPRESS_THRESHOLD_TOKENS", "50000")))
-logger.info("Callback target: %d tokens", int(os.environ.get("LITE_LLM_COMPRESS_TARGET_TOKENS", "16384")))
+logger.info("LiteLLM proxy starting in-process with GLM history sanitizer")
 logger.info("=" * 60)
 
 # Verify callback is registered before starting
