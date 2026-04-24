@@ -11,6 +11,7 @@ The callback:
      would exceed the model's context window, preventing hard vLLM errors.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -37,6 +38,93 @@ TOOL_RESULT_MAX_CHARS = 400
 # Detects previously compressed results — prevents double-compression on repeated calls.
 _COMPRESSED_MARKER_RE = re.compile(r'\[… \d+ chars omitted\]')
 
+# ── Tool schema compression ────────────────────────────────────────────────────
+
+# Max chars for a tool's top-level description before truncation.
+TOOL_DESC_MAX_CHARS = 280
+
+# Max chars for a per-parameter description before truncation.
+TOOL_PARAM_DESC_MAX_CHARS = 120
+
+# Fields inside a parameter's JSON schema that are purely documentary and safe
+# to drop without affecting the model's ability to call the tool correctly.
+_TOOL_SCHEMA_DROP_FIELDS = frozenset({"examples", "x-ms-docs", "deprecated", "additionalProperties"})
+
+
+def _compress_param_schema(schema: Any) -> Any:
+    """Strip verbose/documentary fields from a single parameter's JSON schema."""
+    if not isinstance(schema, dict):
+        return schema
+    out: dict = {}
+    for k, v in schema.items():
+        if k in _TOOL_SCHEMA_DROP_FIELDS:
+            continue
+        if k == "description" and isinstance(v, str) and len(v) > TOOL_PARAM_DESC_MAX_CHARS:
+            v = v[:TOOL_PARAM_DESC_MAX_CHARS] + "…"
+        elif k == "properties" and isinstance(v, dict):
+            v = {pk: _compress_param_schema(pv) for pk, pv in v.items()}
+        elif k == "items" and isinstance(v, dict):
+            v = _compress_param_schema(v)
+        out[k] = v
+    return out
+
+
+def _compress_tool_schemas(tools: list) -> tuple[list, bool]:
+    """
+    Compress tool schema definitions to reduce context token usage.
+
+    Safe transforms:
+    - Truncate top-level function descriptions to TOOL_DESC_MAX_CHARS.
+    - Truncate per-parameter descriptions to TOOL_PARAM_DESC_MAX_CHARS.
+    - Remove purely documentary fields (examples, deprecated, x-ms-docs).
+
+    The model can still call every tool correctly after compression; it only
+    loses verbose explanation text it doesn't need at inference time.
+
+    Returns (compressed_tools, was_changed).
+    """
+    if not tools:
+        return tools, False
+
+    compressed = []
+    changed = False
+
+    for tool in tools:
+        if not isinstance(tool, dict):
+            compressed.append(tool)
+            continue
+
+        fn = tool.get("function")
+        if not isinstance(fn, dict):
+            compressed.append(tool)
+            continue
+
+        new_fn = dict(fn)
+        did_change = False
+
+        # Truncate top-level description.
+        desc = fn.get("description", "")
+        if isinstance(desc, str) and len(desc) > TOOL_DESC_MAX_CHARS:
+            new_fn["description"] = desc[:TOOL_DESC_MAX_CHARS] + "…"
+            did_change = True
+
+        # Compress parameter schemas.
+        params = fn.get("parameters")
+        if isinstance(params, dict):
+            new_params = _compress_param_schema(params)
+            if new_params != params:
+                new_fn["parameters"] = new_params
+                did_change = True
+
+        if did_change:
+            compressed.append({**tool, "function": new_fn})
+            changed = True
+        else:
+            compressed.append(tool)
+
+    return compressed, changed
+
+
 # ── Context window management ──────────────────────────────────────────────────
 
 # Hard context limit from glm_server.py --max-model-len.
@@ -54,6 +142,18 @@ _DEFAULT_MAX_OUTPUT_TOKENS = 4_096
 
 # Path where session state is saved when a context overflow cannot be recovered.
 _OVERFLOW_SESSION_PATH = Path(__file__).parent / "logs" / "last_session.json"
+
+# ── Preserved-thinking configuration ──────────────────────────────────────────
+
+# When True, reasoning_content from recent assistant turns is re-injected into
+# the conversation history before each request.  This lets the model see its own
+# prior reasoning chain, improving continuity and increasing KV-cache prefix hits.
+# Set to False to fall back to the original strip-only behaviour.
+PRESERVE_THINKING = True
+
+# How many of the most-recent assistant turns to carry reasoning for.
+# Older turns are left as clean content to bound extra context growth.
+_PRESERVE_TURNS = 3
 
 
 def _strip_thinking_tokens(text: str) -> str:
@@ -282,6 +382,50 @@ def _trim_to_context(messages: list, token_budget: int) -> tuple[list, bool]:
     return head + middle + current_turn, was_changed
 
 
+# ── Preserved-thinking reasoning store ────────────────────────────────────────
+
+class _ReasoningStore:
+    """
+    Bounded FIFO cache: md5(content) → reasoning_content.
+
+    Captures the model's reasoning_content from each completed response so it
+    can be injected back into the conversation history on the next request.
+    This implements "preserved thinking": the model sees its own previous
+    reasoning, which improves reasoning continuity and increases KV-cache
+    prefix hit rates (the reasoning tokens are already cached from the prior
+    turn and do not require recomputation).
+
+    Memory cost: bounded to max_size entries (default 30).  Each entry holds
+    one reasoning string — typically a few KB at most.  No extra GPU RAM is
+    used; the KV cache is pre-allocated at startup.
+    """
+
+    def __init__(self, max_size: int = 30) -> None:
+        self._max = max_size
+        self._data: dict[str, str] = {}
+        self._keys: list[str] = []   # FIFO eviction order
+
+    def _key(self, content: str) -> str:
+        return hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()
+
+    def put(self, content: str, reasoning: str) -> None:
+        if not content or not reasoning:
+            return
+        k = self._key(content)
+        if k not in self._data:
+            if len(self._keys) >= self._max:
+                evicted = self._keys.pop(0)
+                self._data.pop(evicted, None)
+            self._keys.append(k)
+        self._data[k] = reasoning
+
+    def get(self, content: str) -> Optional[str]:
+        return self._data.get(self._key(content))
+
+
+_reasoning_store = _ReasoningStore()
+
+
 # ── Context overflow recovery ──────────────────────────────────────────────────
 
 def _extract_msg_text(msg: dict) -> str:
@@ -395,6 +539,19 @@ class GLMHistorySanitizer(CustomLogger):
             if isinstance(msg, dict) and msg.get("role") == "user":
                 last_user_idx = i
 
+        # Preserved thinking: collect indices of the most-recent assistant turns
+        # before the current user message.  Only those turns get reasoning_content
+        # re-injected; older turns are left clean to bound context growth.
+        recent_asst_set: set[int] = set()
+        if PRESERVE_THINKING:
+            asst_before = [
+                i for i, m in enumerate(messages)
+                if isinstance(m, dict)
+                and m.get("role") == "assistant"
+                and i < last_user_idx
+            ]
+            recent_asst_set = set(asst_before[-_PRESERVE_TURNS:])
+
         sanitized: list[Any] = []
         changed = False
 
@@ -408,6 +565,18 @@ class GLMHistorySanitizer(CustomLogger):
             if role == "assistant":
                 content = msg.get("content")
                 if isinstance(content, str):
+                    # Inject preserved reasoning for the most-recent turns.
+                    if PRESERVE_THINKING and i in recent_asst_set and "reasoning_content" not in msg:
+                        stored = _reasoning_store.get(content)
+                        if stored:
+                            msg = {**msg, "reasoning_content": stored}
+                            changed = True
+                            logger.debug(
+                                "Preserved thinking: injected reasoning turn %d "
+                                "(%d reasoning chars → %d content chars)",
+                                i, len(stored), len(content),
+                            )
+                    # Strip any thinking tokens still embedded in content (safety net).
                     stripped = _strip_thinking_tokens(content)
                     if stripped != content:
                         msg = {**msg, "content": stripped}
@@ -429,10 +598,25 @@ class GLMHistorySanitizer(CustomLogger):
         if changed:
             data = {**data, "messages": sanitized}
 
+        # ── Tool schema compression ───────────────────────────────────────────
+        # Compress tool descriptions before token counting so the budget
+        # calculation reflects the actual (reduced) tool schema footprint.
+        tools = data.get("tools") or []
+        if tools:
+            compressed_tools, tools_changed = _compress_tool_schemas(tools)
+            if tools_changed:
+                before_tool_tokens = _tools_token_estimate(tools)
+                after_tool_tokens = _tools_token_estimate(compressed_tools)
+                logger.debug(
+                    "Tool schema compression: %d tools, ~%d→~%d tokens saved",
+                    len(tools), before_tool_tokens, after_tool_tokens,
+                )
+                data = {**data, "tools": compressed_tools}
+                tools = compressed_tools
+
         # ── Context window trim ───────────────────────────────────────────────
         # Account for tool schemas (sent outside messages[]) and the requested
         # output budget so that the total request stays within the model limit.
-        tools = data.get("tools") or []
         tools_tokens = _tools_token_estimate(tools)
         # Use the actual requested max_tokens; cap at half the context to keep
         # the budget positive even for very large output requests.
@@ -478,6 +662,67 @@ class GLMHistorySanitizer(CustomLogger):
             data = {**data, "messages": sanitized}
             return data
         return None
+
+    async def async_log_success_event(
+        self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any
+    ) -> None:
+        """
+        Capture reasoning_content from completed responses for preserved thinking.
+
+        After each successful response from vLLM, stores the model's reasoning
+        in _reasoning_store keyed by the assistant's content.  On the next
+        request, async_pre_call_hook re-injects this reasoning into the
+        historical assistant message so the model sees its prior chain of thought.
+        """
+        if not PRESERVE_THINKING:
+            return
+        try:
+            choices = getattr(response_obj, "choices", None) or []
+            if not choices:
+                return
+            choice = choices[0]
+            msg = getattr(choice, "message", None) or getattr(choice, "delta", None)
+            if not msg:
+                return
+            reasoning = getattr(msg, "reasoning_content", None) or ""
+            content_raw = getattr(msg, "content", None) or ""
+            content = (
+                content_raw if isinstance(content_raw, str)
+                else _extract_msg_text({"content": content_raw})
+            )
+            if reasoning and content:
+                _reasoning_store.put(content, reasoning)
+                logger.debug(
+                    "Preserved thinking: stored %d-char reasoning for %d-char response",
+                    len(reasoning), len(content),
+                )
+        except Exception as exc:
+            logger.debug("Preserved thinking capture error: %s", exc)
+
+    def log_success_event(
+        self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any
+    ) -> None:
+        """Sync version of async_log_success_event for non-async contexts."""
+        if not PRESERVE_THINKING:
+            return
+        try:
+            choices = getattr(response_obj, "choices", None) or []
+            if not choices:
+                return
+            choice = choices[0]
+            msg = getattr(choice, "message", None) or getattr(choice, "delta", None)
+            if not msg:
+                return
+            reasoning = getattr(msg, "reasoning_content", None) or ""
+            content_raw = getattr(msg, "content", None) or ""
+            content = (
+                content_raw if isinstance(content_raw, str)
+                else _extract_msg_text({"content": content_raw})
+            )
+            if reasoning and content:
+                _reasoning_store.put(content, reasoning)
+        except Exception as exc:
+            logger.debug("Preserved thinking capture error (sync): %s", exc)
 
 
 # ── Singleton for LiteLLM callback registration ────────────────────────────────
