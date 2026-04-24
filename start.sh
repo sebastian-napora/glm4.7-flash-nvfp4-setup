@@ -32,6 +32,25 @@ start_backend() {
     echo "Backend PID: $!"
 }
 
+new_token_session() {
+    # Create a fresh session ID and write it to the shared session file.
+    # Both the proxy and the stats server read this file at startup, so
+    # every ./start.sh run begins a clean session automatically.
+    NEW_SID=$($VENV_PYTHON -c "
+import sys; sys.path.insert(0, '$SCRIPT_DIR')
+import glm_token_tracker
+sid = glm_token_tracker.new_session()
+print(sid, end='')
+" 2>/dev/null)
+    echo "📊 New token session: ${NEW_SID:-unknown}"
+}
+
+start_stats() {
+    echo "🚀 Starting token stats server (port 11113)..."
+    $VENV_PYTHON token_stats_server.py &
+    echo "Stats PID: $!"
+}
+
 start_proxy() {
     echo "🚀 Starting LiteLLM proxy (port 11111)..."
     $VENV_PYTHON server_compress.py &
@@ -41,13 +60,17 @@ start_proxy() {
 case "${1:-both}" in
     both)
         start_backend
+        new_token_session
         echo "Waiting 5s for backend to initialize..."
         sleep 5
+        start_stats
+        sleep 1
         start_proxy
         echo ""
-        echo "✅ Both services started:"
-        echo "   vLLM backend:  http://0.0.0.0:11112"
-        echo "   LiteLLM proxy: http://0.0.0.0:11111"
+        echo "✅ All services started:"
+        echo "   vLLM backend:   http://0.0.0.0:11112"
+        echo "   LiteLLM proxy:  http://0.0.0.0:11111"
+        echo "   Token stats:    http://0.0.0.0:11113"
         echo ""
         echo "Test with:"
         echo "  curl http://localhost:11112/health"
@@ -57,7 +80,11 @@ case "${1:-both}" in
         start_backend
         ;;
     proxy)
+        new_token_session
         start_proxy
+        ;;
+    stats)
+        start_stats
         ;;
     *)
         echo "Usage: $0 [both|backend|proxy]"

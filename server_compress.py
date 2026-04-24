@@ -19,8 +19,10 @@ from pathlib import Path
 
 import litellm
 
-import glm_compress  # noqa: F401 — registers request sanitization before startup
+import glm_compress       # noqa: F401 — strips thinking tokens from history
+import glm_token_tracker  # noqa: F401 — records per-request token usage
 glm_compress.register()
+glm_token_tracker.register()
 
 # Setup detailed logging
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
