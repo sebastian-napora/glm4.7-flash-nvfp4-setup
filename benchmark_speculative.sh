@@ -21,6 +21,8 @@
 #   --skip-ngram        Skip the N-gram phase
 #   --skip-sglang       Skip the SGLang EAGLE phase
 #   --startup-timeout S Seconds to wait for health   (default 600)
+#   --eagle-mem F       SGLang static memory fraction (default 0.42)
+#   --eagle-context N   SGLang context length         (default 32768)
 #   -h, --help          Show this help
 #
 # Results saved to logs/bench_speculative_<timestamp>.json
@@ -38,6 +40,11 @@ STARTUP_TIMEOUT=900
 POLL_INTERVAL=3
 SKIP_NGRAM=0
 SKIP_SGLANG=0
+EAGLE_MEM_FRACTION=0.42
+EAGLE_MAX_MODEL_LEN=32768
+EAGLE_SPEC_NUM_STEPS=3
+EAGLE_SPEC_EAGLE_TOPK=1
+EAGLE_SPEC_DRAFT_TOKENS=4
 
 usage() { sed -n '3,30p' "$0" | sed 's/^# \?//'; exit 0; }
 
@@ -50,6 +57,8 @@ while [[ $# -gt 0 ]]; do
         --skip-ngram)      SKIP_NGRAM=1;          shift ;;
         --skip-sglang)     SKIP_SGLANG=1;         shift ;;
         --startup-timeout) STARTUP_TIMEOUT="$2";  shift 2 ;;
+        --eagle-mem)       EAGLE_MEM_FRACTION="$2"; shift 2 ;;
+        --eagle-context)   EAGLE_MAX_MODEL_LEN="$2"; shift 2 ;;
         -h|--help)         usage ;;
         *) echo "❌ Unknown argument: $1"; exit 1 ;;
     esac
@@ -235,7 +244,14 @@ for TEST in "${TEST_TYPES[@]}"; do
         echo "  [${phase}/${total_phases}] SGLang — EAGLE speculative decoding (embedded NextN)"
         kill_backend
         echo "   🚀 Starting SGLang EAGLE..."
-        "$PY" "${SCRIPT_DIR}/glm_sglang_server.py" \
+        echo "   ⚙️  EAGLE env: mem=${SGLANG_MEM_FRACTION:-$EAGLE_MEM_FRACTION} ctx=${SGLANG_MAX_MODEL_LEN:-$EAGLE_MAX_MODEL_LEN} cuda_graph=${SGLANG_DISABLE_CUDA_GRAPH:-1}"
+        SGLANG_MEM_FRACTION="${SGLANG_MEM_FRACTION:-$EAGLE_MEM_FRACTION}" \
+        SGLANG_MAX_MODEL_LEN="${SGLANG_MAX_MODEL_LEN:-$EAGLE_MAX_MODEL_LEN}" \
+        SGLANG_SPEC_NUM_STEPS="${SGLANG_SPEC_NUM_STEPS:-$EAGLE_SPEC_NUM_STEPS}" \
+        SGLANG_SPEC_EAGLE_TOPK="${SGLANG_SPEC_EAGLE_TOPK:-$EAGLE_SPEC_EAGLE_TOPK}" \
+        SGLANG_SPEC_DRAFT_TOKENS="${SGLANG_SPEC_DRAFT_TOKENS:-$EAGLE_SPEC_DRAFT_TOKENS}" \
+        SGLANG_DISABLE_CUDA_GRAPH="${SGLANG_DISABLE_CUDA_GRAPH:-1}" \
+            "$PY" "${SCRIPT_DIR}/glm_sglang_server.py" \
             >> "${RESULTS_DIR}/bench_spec_sglang_eagle.log" 2>&1 &
         SGLANG_PID=$!
         # SGLang health: /health is basic readiness; /health_generate verifies
@@ -249,6 +265,7 @@ for TEST in "${TEST_TYPES[@]}"; do
         else
             echo "   ⚠️  SGLang EAGLE skipped — startup failed (OOM or crash)."
             echo "   💡 Check logs/bench_spec_sglang_eagle.log for details."
+            tail -40 "${RESULTS_DIR}/bench_spec_sglang_eagle.log" 2>/dev/null || true
         fi
     fi
 
