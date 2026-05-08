@@ -44,12 +44,12 @@ Env knobs
   SGLANG_MODEL               Model path (default GadflyII/GLM-4.7-Flash-NVFP4)
   SGLANG_PORT                Server port (default 11112)
   SGLANG_HOST                Bind address (default 0.0.0.0)
-  SGLANG_MEM_FRACTION        Static memory fraction (default 0.42)
+  SGLANG_MEM_FRACTION        Static memory fraction (default 0.45)
   SGLANG_SPEC_NUM_STEPS      EAGLE steps (default 3)
   SGLANG_SPEC_EAGLE_TOPK     Top-k per step (default 1)
   SGLANG_SPEC_DRAFT_TOKENS   Draft tokens per cycle (default 4)
   SGLANG_TP_SIZE             Tensor parallel size (default 1 for single GB10)
-  SGLANG_MAX_MODEL_LEN       Context window (default 32768)
+  SGLANG_MAX_MODEL_LEN       Context window (default 180000)
   SGLANG_DISABLE_CUDA_GRAPH  Disable all CUDA graphs (default 1=disabled).
                              NVFP4+EAGLE has an irrecoverable KV-cache head-dim
                              shape mismatch during graph capture ([N,20,64] vs
@@ -89,12 +89,12 @@ def main():
     MODEL             = os.environ.get("SGLANG_MODEL",            "GadflyII/GLM-4.7-Flash-NVFP4")
     PORT              = os.environ.get("SGLANG_PORT",             "11112")
     HOST              = os.environ.get("SGLANG_HOST",             "0.0.0.0")
-    MEM_FRACTION      = os.environ.get("SGLANG_MEM_FRACTION",     "0.42")
+    MEM_FRACTION      = os.environ.get("SGLANG_MEM_FRACTION",     "0.45")
     SPEC_NUM_STEPS    = os.environ.get("SGLANG_SPEC_NUM_STEPS",   "3")
     SPEC_EAGLE_TOPK   = os.environ.get("SGLANG_SPEC_EAGLE_TOPK",  "1")
     SPEC_DRAFT_TOKENS = os.environ.get("SGLANG_SPEC_DRAFT_TOKENS","4")
     TP_SIZE           = os.environ.get("SGLANG_TP_SIZE",          "1")
-    MAX_MODEL_LEN     = os.environ.get("SGLANG_MAX_MODEL_LEN",    "32768")
+    MAX_MODEL_LEN     = os.environ.get("SGLANG_MAX_MODEL_LEN",    "180000")
     # NVFP4 + EAGLE has an irrecoverable head-dim shape mismatch during CUDA
     # graph capture ([N,20,64] vs [N,20,256]) that --cuda-graph-max-bs cannot
     # fix (it's a KV dtype/packing issue, not a batch-size issue).

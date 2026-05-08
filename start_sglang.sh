@@ -29,8 +29,8 @@
 #   SGLANG_SPEC_NUM_STEPS      EAGLE steps (default 3)
 #   SGLANG_SPEC_EAGLE_TOPK     Top-k per step (default 1)
 #   SGLANG_SPEC_DRAFT_TOKENS   Draft tokens per cycle (default 4)
-#   SGLANG_MEM_FRACTION        Static memory fraction (default 0.80)
-#   SGLANG_MAX_MODEL_LEN       Context window (default 131072)
+#   SGLANG_MEM_FRACTION        Static memory fraction (default 0.45)
+#   SGLANG_MAX_MODEL_LEN       Context window (default 180000)
 #   SGLANG_TP_SIZE             Tensor parallel size (default 1)
 #
 # Logs:  logs/sglang_server.log, logs/litellm_proxy.log
@@ -54,8 +54,8 @@ export SGLANG_MODEL="${SGLANG_MODEL:-GadflyII/GLM-4.7-Flash-NVFP4}"
 export SGLANG_SPEC_NUM_STEPS="${SGLANG_SPEC_NUM_STEPS:-3}"
 export SGLANG_SPEC_EAGLE_TOPK="${SGLANG_SPEC_EAGLE_TOPK:-1}"
 export SGLANG_SPEC_DRAFT_TOKENS="${SGLANG_SPEC_DRAFT_TOKENS:-4}"
-export SGLANG_MEM_FRACTION="${SGLANG_MEM_FRACTION:-0.50}"
-export SGLANG_MAX_MODEL_LEN="${SGLANG_MAX_MODEL_LEN:-131072}"
+export SGLANG_MEM_FRACTION="${SGLANG_MEM_FRACTION:-0.45}"
+export SGLANG_MAX_MODEL_LEN="${SGLANG_MAX_MODEL_LEN:-180000}"
 export SGLANG_TP_SIZE="${SGLANG_TP_SIZE:-1}"
 
 echo "🦅 SGLang EAGLE config:"
