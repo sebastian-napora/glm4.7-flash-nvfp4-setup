@@ -12,6 +12,7 @@
 #   ./benchmark_speculative.sh --test all         # short + rag + code
 #   ./benchmark_speculative.sh --skip-ngram       # only vLLM normal vs SGLang EAGLE
 #   ./benchmark_speculative.sh --skip-sglang      # only vLLM normal vs N-gram
+#   ./benchmark_speculative.sh --only-eagle       # only SGLang EAGLE
 #
 # Options:
 #   --runs N            Measured runs per mode        (default 5)
@@ -20,6 +21,8 @@
 #   --test TYPE         Prompt type: short|rag|code|all  (default rag)
 #   --skip-ngram        Skip the N-gram phase
 #   --skip-sglang       Skip the SGLang EAGLE phase
+#   --skip-normal       Skip the vLLM normal baseline
+#   --only-eagle        Run only the SGLang EAGLE phase
 #   --startup-timeout S Seconds to wait for health   (default 600)
 #   --eagle-mem F       SGLang static memory fraction (default 0.42)
 #   --eagle-context N   SGLang context length         (default 32768)
@@ -40,6 +43,7 @@ STARTUP_TIMEOUT=900
 POLL_INTERVAL=3
 SKIP_NGRAM=0
 SKIP_SGLANG=0
+SKIP_NORMAL=0
 EAGLE_MEM_FRACTION=0.42
 EAGLE_MAX_MODEL_LEN=32768
 EAGLE_SPEC_NUM_STEPS=3
@@ -56,6 +60,8 @@ while [[ $# -gt 0 ]]; do
         --test)            TEST_TYPE="$2";        shift 2 ;;
         --skip-ngram)      SKIP_NGRAM=1;          shift ;;
         --skip-sglang)     SKIP_SGLANG=1;         shift ;;
+        --skip-normal)     SKIP_NORMAL=1;         shift ;;
+        --only-eagle)      SKIP_NORMAL=1; SKIP_NGRAM=1; SKIP_SGLANG=0; shift ;;
         --startup-timeout) STARTUP_TIMEOUT="$2";  shift 2 ;;
         --eagle-mem)       EAGLE_MEM_FRACTION="$2"; shift 2 ;;
         --eagle-context)   EAGLE_MAX_MODEL_LEN="$2"; shift 2 ;;
@@ -184,9 +190,11 @@ echo "║   GLM-4.7-Flash: Normal vs N-gram vs SGLang EAGLE Benchmark  ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "  Config:  runs=${RUNS}  warmup=${WARMUP}  max_tokens=${MAX_TOKENS}  test=${TEST_TYPE}"
-modes="vLLM-normal"
+modes=""
+[[ "$SKIP_NORMAL" == "0" ]] && modes+="vLLM-normal"
 [[ "$SKIP_NGRAM"  == "0" ]] && modes+=" | vLLM-ngram"
 [[ "$SKIP_SGLANG" == "0" ]] && modes+=" | SGLang-EAGLE"
+modes="${modes# | }"
 echo "  Modes:   ${modes}"
 echo ""
 
@@ -196,29 +204,35 @@ declare -A NORMAL_JSON_MAP
 declare -A NGRAM_JSON_MAP
 declare -A EAGLE_JSON_MAP
 
-total_phases=$(( 1 + (SKIP_NGRAM == 0 ? 1 : 0) + (SKIP_SGLANG == 0 ? 1 : 0) ))
-phase=0
+total_phases=$(( (SKIP_NORMAL == 0 ? 1 : 0) + (SKIP_NGRAM == 0 ? 1 : 0) + (SKIP_SGLANG == 0 ? 1 : 0) ))
+if (( total_phases == 0 )); then
+    echo "❌ Nothing to run: all benchmark modes are skipped."
+    exit 1
+fi
 
 for TEST in "${TEST_TYPES[@]}"; do
+    phase=0
     PROMPT="${PROMPTS[$TEST]}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  Prompt type: ${TEST^^}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     # ── Phase 1: vLLM normal ────────────────────────────────────────────────
-    phase=$(( phase + 1 ))
-    echo ""
-    echo "  [${phase}/${total_phases}] vLLM — normal autoregressive (baseline)"
-    kill_backend
-    echo "   🚀 Starting vLLM normal..."
-    "$PY" "${SCRIPT_DIR}/glm_server.py" \
-        >> "${RESULTS_DIR}/bench_spec_vllm_normal.log" 2>&1 &
-    wait_for_health "vLLM normal"
-    NORMAL_OUT="${RESULTS_DIR}/bench_${TIMESTAMP}_${TEST}_normal.json"
-    echo "   📊 Running ${RUNS} measured requests (${WARMUP} warmup)..."
-    run_bench "normal" "$PROMPT" "$NORMAL_OUT"
-    NORMAL_JSON_MAP[$TEST]="$NORMAL_OUT"
-    echo "   ✅ vLLM normal done."
+    if [[ "$SKIP_NORMAL" == "0" ]]; then
+        phase=$(( phase + 1 ))
+        echo ""
+        echo "  [${phase}/${total_phases}] vLLM — normal autoregressive (baseline)"
+        kill_backend
+        echo "   🚀 Starting vLLM normal..."
+        "$PY" "${SCRIPT_DIR}/glm_server.py" \
+            >> "${RESULTS_DIR}/bench_spec_vllm_normal.log" 2>&1 &
+        wait_for_health "vLLM normal"
+        NORMAL_OUT="${RESULTS_DIR}/bench_${TIMESTAMP}_${TEST}_normal.json"
+        echo "   📊 Running ${RUNS} measured requests (${WARMUP} warmup)..."
+        run_bench "normal" "$PROMPT" "$NORMAL_OUT"
+        NORMAL_JSON_MAP[$TEST]="$NORMAL_OUT"
+        echo "   ✅ vLLM normal done."
+    fi
 
     # ── Phase 2: vLLM N-gram ────────────────────────────────────────────────
     if [[ "$SKIP_NGRAM" == "0" ]]; then
@@ -298,7 +312,8 @@ print(f"  │  {'tok/s':<30}  {fmt(tps(nd)):>{w}}  {fmt(tps(gd)):>{w}}  {fmt(tps
 print(f"  │  {'latency (s)':<30}  {fmt(lat(nd),'s'):>{w}}  {fmt(lat(gd),'s'):>{w}}  {fmt(lat(ed),'s'):>{w}}  │")
 sp_ng = spd(tps(nd), tps(gd))
 sp_ea = spd(tps(nd), tps(ed))
-print(f"  │  {'speedup vs normal':<30}  {'  1.00x':>{w}}  {sp_ng:>{w}}  {sp_ea:>{w}}  │")
+normal_sp = "  1.00x" if nd else "  n/a"
+print(f"  │  {'speedup vs normal':<30}  {normal_sp:>{w}}  {sp_ng:>{w}}  {sp_ea:>{w}}  │")
 print(f"  └{'─'*60}┘")
 PYEOF
 done
@@ -315,13 +330,15 @@ COMBINED_JSON="${RESULTS_DIR}/bench_speculative_${TIMESTAMP}.json"
 # Build manifest for the Python comparison script
 MANIFEST="${RESULTS_DIR}/bench_${TIMESTAMP}_manifest.json"
 "$PY" - "${TEST_TYPES[*]}" "$TIMESTAMP" "$RESULTS_DIR" \
-       "$SKIP_NGRAM" "$SKIP_SGLANG" > "$MANIFEST" <<'PYEOF'
+       "$SKIP_NGRAM" "$SKIP_SGLANG" "$SKIP_NORMAL" > "$MANIFEST" <<'PYEOF'
 import json, sys
-tests, ts, rd, skip_ngram, skip_sglang = \
-    sys.argv[1].split(), sys.argv[2], sys.argv[3], sys.argv[4]=="1", sys.argv[5]=="1"
+tests, ts, rd, skip_ngram, skip_sglang, skip_normal = \
+    sys.argv[1].split(), sys.argv[2], sys.argv[3], sys.argv[4]=="1", sys.argv[5]=="1", sys.argv[6]=="1"
 m = {}
 for t in tests:
-    m[t] = {"normal": f"{rd}/bench_{ts}_{t}_normal.json"}
+    m[t] = {}
+    if not skip_normal:
+        m[t]["normal"] = f"{rd}/bench_{ts}_{t}_normal.json"
     if not skip_ngram:
         m[t]["ngram"] = f"{rd}/bench_{ts}_{t}_ngram.json"
     if not skip_sglang:
@@ -355,7 +372,7 @@ def delta(a, b, unit=""):
 all_results = {}
 
 for test, paths in manifest.items():
-    nd = load(paths["normal"])
+    nd = load(paths.get("normal"))
     gd = load(paths.get("ngram"))
     ed = load(paths.get("eagle"))
 
@@ -383,7 +400,8 @@ for test, paths in manifest.items():
     # speedup vs normal row
     sp_ng  = speedup(tps(nd), tps(gd))
     sp_ea  = speedup(tps(nd), tps(ed))
-    row_sp = f"  │  {'speedup vs normal':<30}  {'  1.00x':>{col_w}}  {sp_ng:>{col_w}}  {sp_ea:>{col_w}}  │"
+    normal_sp = "  1.00x" if nd else "  n/a"
+    row_sp = f"  │  {'speedup vs normal':<30}  {normal_sp:>{col_w}}  {sp_ng:>{col_w}}  {sp_ea:>{col_w}}  │"
     print(row_sp)
 
     print(f"  └{'─'*(len(sep)-1)}┘")
@@ -398,8 +416,8 @@ for test, paths in manifest.items():
             else:           return f"  ⚠️  {name}: {v:.2f}× — slower than baseline"
         except: return f"  ─  {name}: n/a"
 
-    if gd: print(interpret(sp_ng, "vLLM N-gram"))
-    if ed: print(interpret(sp_ea, "SGLang EAGLE"))
+    if gd and nd: print(interpret(sp_ng, "vLLM N-gram"))
+    if ed and nd: print(interpret(sp_ea, "SGLang EAGLE"))
 
     all_results[test] = {
         "normal": nd, "ngram": gd, "eagle": ed,
@@ -416,7 +434,7 @@ PYEOF
 
 echo ""
 echo "  Logs:"
-echo "    vLLM normal : logs/bench_spec_vllm_normal.log"
+[[ "$SKIP_NORMAL" == "0" ]] && echo "    vLLM normal : logs/bench_spec_vllm_normal.log"
 [[ "$SKIP_NGRAM"  == "0" ]] && echo "    vLLM N-gram : logs/bench_spec_vllm_ngram.log"
 [[ "$SKIP_SGLANG" == "0" ]] && echo "    SGLang EAGLE: logs/bench_spec_sglang_eagle.log"
 echo ""
