@@ -26,6 +26,8 @@ Output is a self-contained directory — no model, no compiled venv:
 
 ```
 dist/
+├── benchmark.sh
+├── glm_benchmark.py
 ├── glm_server.py
 ├── glm_compress.py
 ├── server_compress.py
@@ -79,7 +81,7 @@ Tested on: NVIDIA DGX Spark (GB10), H100, A100.
 
 ```bash
 cd /path/to/glm-serving/dist
-bash install.sh
+bash scripts/install.sh
 ```
 
 This:
@@ -97,7 +99,7 @@ Expect this to take several minutes on first run (pip downloads and compiles nat
 ### Start both services
 
 ```bash
-bash serve.sh
+bash scripts/serve.sh
 ```
 
 Starts:
@@ -121,7 +123,7 @@ bash scripts/serve_proxy.sh
 ```bash
 cp .env.example .env
 # edit .env
-bash serve.sh
+bash scripts/serve.sh
 ```
 
 ---
@@ -143,9 +145,25 @@ curl http://localhost:11111/v1/chat/completions \
   -d '{
     "model": "glm-4.7-flash-nvfp4",
     "messages": [{"role": "user", "content": "Hello"}],
-    "max_tokens": 50
-  }'
+     "max_tokens": 50
+   }'
 ```
+
+## Benchmark local inference
+
+```bash
+# One-shot runner: starts what it needs, waits for health, then benchmarks
+./benchmark.sh --target both
+
+# Fresh local restart before benchmarking
+./benchmark.sh --restart --target both
+
+# Or benchmark directly if services are already up
+python glm_benchmark.py --target both
+```
+
+This reports end-to-end latency plus output/total tokens per second for
+LiteLLM, direct vLLM, or both.
 
 ---
 
@@ -192,7 +210,7 @@ To adjust ports or other settings:
 ```bash
 cp .env.example .env
 nano .env
-bash serve.sh  # restart to apply
+bash scripts/serve.sh  # restart to apply
 ```
 
 ---
@@ -203,7 +221,7 @@ bash serve.sh  # restart to apply
 
 ```bash
 bash kill.sh
-bash serve.sh
+bash scripts/serve.sh
 ```
 
 ### Model download is very slow
@@ -212,7 +230,7 @@ Set a HuggingFace mirror:
 
 ```bash
 export HF_ENDPOINT=https://hf-mirror.com
-bash serve.sh
+bash scripts/serve.sh
 ```
 
 Or pre-download the model on a fast connection:
@@ -262,5 +280,5 @@ tail -f logs/proxy.log
 ```bash
 bash kill.sh
 # wait 2 seconds
-bash serve.sh
+bash scripts/serve.sh
 ```
