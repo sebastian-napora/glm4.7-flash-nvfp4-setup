@@ -19,9 +19,11 @@ import traceback
 # Allow long max_model_len (model's native limit is 202752)
 os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 
-# Disable FlashInfer MoE backends — they trigger CUDA misaligned address errors
-# on the GB10 (compute capability 12.1, beyond PyTorch's supported range 8.0-12.0).
+# FlashInfer MoE FP4 is disabled — it triggers CUDA misaligned address errors on
+# GB10 (compute capability 12.1, beyond PyTorch's supported range 8.0–12.0).
 # Falls back to VLLM_CUTLASS MoE backend which is stable on this hardware.
+# NOTE: --moe-backend flashinfer would override this; keep it out of argv until
+#       upstream FlashInfer ships CC 12.1 kernels.
 os.environ["VLLM_USE_FLASHINFER_MOE_FP4"] = "0"
 
 # Enable VLLM request logging
@@ -66,13 +68,90 @@ async def main():
     serve_parser = subparsers.add_parser("serve")
     serve_parser = make_arg_parser(serve_parser)
 
+    # ── Speculative decoding (MTP) ──────────────────────────────────────────
+    # GLM-4.7-Flash ships built-in Multi-Token Prediction layers
+    # (config.json: "num_nextn_predict_layers": 1). vLLM can use them as a
+    # zero-overhead draft head — no second model required.
+    #
+    # Enable:   VLLM_SPEC_MTP=1 ./start.sh   (or use start_mtp.sh)
+    # Tuning:   VLLM_SPEC_NUM_TOKENS=1       (recommended; vLLM GLM recipe)
+    #
+    # Per the vLLM GLM recipe, k=1 keeps acceptance >90 % and gives the best
+    # net throughput; k=3 increases accept length but lowers acceptance rate
+    # and hurts overall tok/s.
+    #
+    # ⚠️  KNOWN INCOMPATIBILITY with `GadflyII/GLM-4.7-Flash-NVFP4` ⚠️
+    # That checkpoint NVFP4-quantizes the MTP head's `eh_proj` linear, but
+    # vLLM (≤ 0.19.x and current main) hard-codes `self.eh_proj = nn.Linear`
+    # in `glm4_moe_lite_mtp.py` (unquantized). Loading then crashes with:
+    #   KeyError: 'model.layers.47.eh_proj.input_global_scale'
+    # Fix is upstream: either the checkpoint's quantization_config.ignore
+    # must list `eh_proj`, or vLLM must wrap it in a quant-aware Linear.
+    # Until then, MTP is disabled by default and a hard-stop is raised if
+    # someone forces it on with this model. Override at your own risk with
+    # VLLM_SPEC_MTP_FORCE=1.
+    SPEC_MTP        = os.environ.get("VLLM_SPEC_MTP",        "0") == "1"
+    SPEC_MTP_FORCE  = os.environ.get("VLLM_SPEC_MTP_FORCE",  "0") == "1"
+    SPEC_NUM_TOKENS = os.environ.get("VLLM_SPEC_NUM_TOKENS", "1")
+
+    # ── Speculative decoding (N-gram / Prompt Lookup) ───────────────────────
+    # Drafts tokens by matching n-grams from the input prompt.  No separate
+    # model required — zero extra memory, zero compatibility issues.
+    # Best for: RAG, summarisation, code completion (output repeats input).
+    # Enable:  VLLM_SPEC_NGRAM=1 ./start.sh   (or use start_ngram.sh)
+    # Tuning:  VLLM_SPEC_NGRAM_K   — draft tokens per step (default 5)
+    #          VLLM_SPEC_NGRAM_MIN  — min n-gram length to match (default 3)
+    #          VLLM_SPEC_NGRAM_MAX  — max n-gram length to match (default 5)
+    SPEC_NGRAM     = os.environ.get("VLLM_SPEC_NGRAM",     "0") == "1"
+    SPEC_NGRAM_K   = os.environ.get("VLLM_SPEC_NGRAM_K",   "5")
+    SPEC_NGRAM_MIN = os.environ.get("VLLM_SPEC_NGRAM_MIN", "3")
+    SPEC_NGRAM_MAX = os.environ.get("VLLM_SPEC_NGRAM_MAX", "5")
+
+    # MTP runs an extra forward per step → reduce KV-cache budget a touch on
+    # the 128 GB unified GB10 to leave headroom for the draft activations.
+    GPU_MEM_UTIL    = os.environ.get(
+        "VLLM_GPU_MEM_UTIL",
+        "0.50" if SPEC_MTP else "0.50",
+    )
+
+    # ── Env-configurable knobs ──────────────────────────────────────────────
+    # MAX_MODEL_LEN: 202752 is the model's native limit, but for Copilot use
+    # 32K–65K is more than enough and reserves far less KV-cache RAM.
+    # Rule of thumb on GB10: each 65536 tokens of context ≈ 4-8 GB KV cache.
+    MAX_MODEL_LEN = os.environ.get("VLLM_MAX_MODEL_LEN", "202752")
+
+    # OPTIMIZATION_LEVEL:
+    #   ⚠️  GLM-4.7-Flash-NVFP4 does NOT support torch.compile (vLLM warns:
+    #       "torch.compile is turned on, but the model does not support it").
+    #   Level 3 = torch.compile + Inductor + CUDA graphs → burns 30-50 GB of
+    #             unified RAM during startup for zero benefit on this model.
+    #   Level 1 = CUDA graphs only (no Inductor) → same runtime speed,
+    #             ~40 GB less peak RAM, much faster cold start.  ← DEFAULT
+    #   Level 0 = eager only → fastest cold start, lowest memory,
+    #             ~10-15% slower decode.
+    OPT_LEVEL = os.environ.get("VLLM_OPT_LEVEL", "1")
+
     argv = [
         "GadflyII/GLM-4.7-Flash-NVFP4",
         "--trust-remote-code",
         "--dtype", "auto",
-        "--max-model-len", "202752",       # leave headroom for system prompt
-        "--gpu-memory-utilization", "0.70",
-        "--enforce-eager",
+        "--load-format", "safetensors",
+        "--max-model-len", MAX_MODEL_LEN,
+        # ── Memory ──────────────────────────────────────────────────────────────
+        # GB10 has 128 GB unified RAM (CPU+GPU shared).
+        # 0.75 × 128 ≈ 96 GB reserved for vLLM (weights + KV cache pool).
+        # With OPT_LEVEL=1 (no Inductor), peak load stays well under 100 GB.
+        "--gpu-memory-utilization", GPU_MEM_UTIL,
+        # ── Attention & decode ───────────────────────────────────────────────────
+        # NOTE: --attention-backend flashinfer is NOT compatible with GLM-4.7
+        # ("head_size not supported", "MLA not supported"). Stick with the
+        # default Flash-Attention backend chosen by vLLM for this model.
+        # ── Batching ────────────────────────────────────────────────────────────
+        "--max-num-batched-tokens", "65536",
+        # ── Optimization level ───────────────────────────────────────────────────
+        # Default 1 = CUDA graphs only; torch.compile unsupported on this model.
+        # Set VLLM_OPT_LEVEL=3 to try full compile (expect ~121 GB peak RAM).
+        "--optimization-level", OPT_LEVEL,
         "--port", "11112",
         "--host", "0.0.0.0",
         "--enable-auto-tool-choice",
@@ -80,6 +159,46 @@ async def main():
         "--tool-call-parser", "glm47",
         "--reasoning-parser", "glm45",
     ]
+
+    # ── Append speculative-decoding flags if enabled ────────────────────────
+    import json as _json
+    if SPEC_NGRAM:
+        spec_cfg = _json.dumps({
+            "method": "ngram",
+            "num_speculative_tokens": int(SPEC_NGRAM_K),
+            "prompt_lookup_min": int(SPEC_NGRAM_MIN),
+            "prompt_lookup_max": int(SPEC_NGRAM_MAX),
+        })
+        argv += ["--speculative-config", spec_cfg]
+        print(f"🔍 N-gram speculative decoding ENABLED  (k={SPEC_NGRAM_K}, ngram_min={SPEC_NGRAM_MIN}, ngram_max={SPEC_NGRAM_MAX})")
+        print("   Best for long-context tasks where output tokens appear in the prompt.")
+    elif SPEC_MTP:
+        if not SPEC_MTP_FORCE:
+            raise SystemExit(
+                "❌ MTP speculative decoding cannot be enabled with the\n"
+                "   GadflyII/GLM-4.7-Flash-NVFP4 checkpoint due to a known\n"
+                "   upstream incompatibility:\n\n"
+                "     • The checkpoint NVFP4-quantizes the MTP head's eh_proj\n"
+                "       (`model.layers.47.eh_proj.{weight_packed,*_scale}`).\n"
+                "     • vLLM hard-codes `self.eh_proj = nn.Linear(...)` in\n"
+                "       `vllm/model_executor/models/glm4_moe_lite_mtp.py`,\n"
+                "       so the FP4 scale tensors have no parameter slot →\n"
+                "       KeyError: 'model.layers.47.eh_proj.input_global_scale'.\n\n"
+                "   Until either the checkpoint adds `eh_proj` to its\n"
+                "   quantization_config.ignore list, or vLLM wraps eh_proj in\n"
+                "   a quant-aware Linear, MTP is disabled.\n\n"
+                "   To proceed anyway (will crash on load), set:\n"
+                "       VLLM_SPEC_MTP_FORCE=1\n"
+            )
+        spec_cfg = _json.dumps({
+            "method": "mtp",
+            "num_speculative_tokens": int(SPEC_NUM_TOKENS),
+        })
+        argv += ["--speculative-config", spec_cfg]
+        print(f"🚀 MTP speculative decoding ENABLED  (k={SPEC_NUM_TOKENS}, gpu_mem={GPU_MEM_UTIL})")
+        print("⚠️  VLLM_SPEC_MTP_FORCE=1 — known to crash on this NVFP4 checkpoint.")
+    else:
+        print("ℹ️  Speculative decoding disabled. Use start_ngram.sh for n-gram or start_mtp.sh (blocked).")
 
     args = serve_parser.parse_args(argv)
     args.command = "serve"

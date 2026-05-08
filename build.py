@@ -4,10 +4,8 @@ Build script — creates a distributable package of the GLM-4.7-Flash-NVFP4 serv
 
 Package contents (no model, no compiled venv — those are machine-specific):
   dist/
-  ├── install.sh              — install deps on target machine
-  ├── serve.sh                — start both servers
-  ├── serve_backend.sh        — start vLLM backend only
-  ├── serve_proxy.sh          — start LiteLLM proxy only
+  ├── benchmark.sh           — start needed services, then benchmark them
+  ├── glm_benchmark.py       — benchmark direct vLLM and/or LiteLLM
   ├── kill.sh                 — stop all servers
   ├── requirements.txt        — pip dependencies
   ├── glm_server.py           — vLLM backend
@@ -15,7 +13,12 @@ Package contents (no model, no compiled venv — those are machine-specific):
   ├── server_compress.py      — LiteLLM proxy entrypoint
   ├── lite_llm_config.yaml    — LiteLLM routing config
   ├── README.md                — deployment + usage guide
-  └── .env.example            — environment variable template
+  ├── .env.example            — environment variable template
+  └── scripts/
+      ├── install.sh          — install deps on target machine
+      ├── serve.sh            — start both servers
+      ├── serve_backend.sh    — start vLLM backend only
+      └── serve_proxy.sh      — start LiteLLM proxy only
 
 Usage:
   python build.py --output dist/
@@ -85,7 +88,8 @@ pip install -r requirements.txt
 
 echo ""
 echo "✅ Installation complete."
-echo "   Next: bash serve.sh"
+echo "   Next: bash scripts/serve.sh"
+echo "   Or benchmark locally: ./benchmark.sh --target both"
 """
 
 SERVE_SH = r"""#!/bin/bash
@@ -201,12 +205,15 @@ Tested on: NVIDIA DGX Spark (GB10, 128 GB), H100, A100.
 
 ```bash
 # 1 — Install dependencies (one-time, creates a fresh venv)
-bash install.sh
+bash scripts/install.sh
 
-# 2 — Download model and start servers (first run downloads ~20 GB)
-bash serve.sh
+# 2 — Download model, start services if needed, and benchmark
+bash benchmark.sh --target both
 
-# 3 — Verify health
+# 3 — Or start servers manually (first run downloads ~20 GB)
+bash scripts/serve.sh
+
+# 4 — Verify health
 curl http://localhost:11112/health
 curl http://localhost:11111/health
 ```
@@ -242,14 +249,14 @@ bash kill.sh
 **Port already in use**
 ```bash
 bash kill.sh
-bash serve.sh
+bash scripts/serve.sh
 ```
 
 **Model download slow**
 Set `HF_ENDPOINT` to a faster mirror:
 ```bash
 export HF_ENDPOINT=https://hf-mirror.com
-bash serve.sh
+bash scripts/serve.sh
 ```
 
 **Low throughput**
@@ -270,9 +277,11 @@ extension. Point it at `http://localhost:11111/v1/chat/completions`.
 | `glm_server.py` | vLLM backend; loads model and handles inference |
 | `glm_compress.py` | LiteLLM hook; strips stored reasoning blocks from assistant history |
 | `server_compress.py` | LiteLLM proxy entrypoint |
+| `glm_benchmark.py` | Benchmark direct vLLM, LiteLLM, or both |
+| `benchmark.sh` | Start needed services, wait for health, then run the benchmark |
 | `lite_llm_config.yaml` | Model routing: `glm-4.7-flash-nvfp4` → `localhost:11112` |
-| `serve.sh` | Start both services |
-| `install.sh` | Create venv + install `requirements.txt` |
+| `scripts/serve.sh` | Start both services |
+| `scripts/install.sh` | Create venv + install `requirements.txt` |
 | `kill.sh` | Stop all servers |
 """
 
@@ -280,6 +289,8 @@ extension. Point it at `http://localhost:11111/v1/chat/completions`.
 SRC_ROOT = Path(__file__).parent
 
 PACKAGE_FILES = [
+    "benchmark.sh",
+    "glm_benchmark.py",
     "glm_server.py",
     "glm_compress.py",
     "server_compress.py",
